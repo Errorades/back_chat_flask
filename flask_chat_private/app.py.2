@@ -1,0 +1,179 @@
+import base64
+import os
+
+from flask import Flask, render_template, request, session, redirect, url_for, send_from_directory
+from flask_socketio import join_room, leave_room, send, emit, SocketIO
+from datetime import datetime
+import uuid
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "hjhjsdahhds"
+app.config['MAX_CONTENT_LENGTH'] = 15 * 1024 * 1024
+socketio = SocketIO(app)
+
+rooms = {}
+
+
+def generate_unique_code(length):
+    code = str(uuid.uuid4())[:length]
+
+    while code in rooms:
+        code = str(uuid.uuid4())[:length]
+
+    return code
+
+
+@app.route("/", methods=["POST", "GET"])
+def home():
+    session.clear()
+    if request.method == "POST":
+        name = request.form.get("name")
+        code = request.form.get("code")
+        join = request.form.get("join", False)
+        create = request.form.get("create", False)
+
+        if not name:
+            return render_template("home.html", error="Please enter a name.", code=code, name=name)
+
+        if join != False and not code:
+            return render_template("home.html", error="Please enter a room code.", code=code, name=name)
+
+        room = code
+        if create != False:
+            room = generate_unique_code(6)
+            rooms[room] = {"members": 0, "messages": [], "sessions": set()}
+        elif code not in rooms:
+            return render_template("home.html", error="Room does not exist.", code=code, name=name)
+
+        session["room"] = room
+        session["name"] = name
+        return redirect(url_for("room"))
+
+    return render_template("home.html")
+
+
+@app.route("/room")
+def room():
+    room = session.get("room")
+    if room is None or session.get("name") is None or room not in rooms:
+        return redirect(url_for("home"))
+
+    return render_template("room.html", code=room, messages=rooms[room]["messages"])
+
+
+@app.route('/download/<filename>')
+def download_file(filename):
+    return send_from_directory('static', filename)
+
+
+@socketio.on("message")
+def message(data):
+    room = session.get("room")
+    if room not in rooms:
+        return
+
+    content = {
+        "name": session.get("name"),
+        "message": data["data"],
+        "time": datetime.now().strftime("%H:%M:%S")
+    }
+    emit("update_message", content, to=room)  # Emit update_message event to room members
+    rooms[room]["messages"].append(content)
+
+    # Emit "update" event to clients in the room
+    for session_id in rooms[room].get("sessions", set()):
+        emit("update", to=session_id)
+
+
+@socketio.on("file")
+def file(data):
+    room = session.get("room")
+    if room not in rooms:
+        return
+
+    file = data["file"]
+    file_data = file["data"].split(",")[1]  # Extract file data after the comma
+    file_data = base64.b64decode(file_data)  # Decode file data from base64 to binary format
+
+    if file["type"].startswith("image/"):
+        # Generate a unique file name
+        file_name = f"{uuid.uuid4().hex}.{file['name'].split('.')[-1]}"
+        file_path = os.path.join("static", "images", file_name)
+    else:
+        # Generate a unique file name
+        file_name = f"{uuid.uuid4().hex}_{file['name']}"
+        file_path = os.path.join("static", "files", file_name)
+
+    # Save the file on the server
+    with open(file_path, "wb") as f:
+        f.write(file_data)
+
+    content = {
+        "name": session.get("name"),
+        "file": {
+            "name": file_name,
+            "size": file["size"],
+            "type": file["type"],
+            "url": url_for("download_file", filename=file_name)
+        },
+        "message": data["message"],
+        "time": datetime.now().strftime("%H:%M:%S")
+    }
+    emit("update_message", content, to=room)  # Emit update_message event to room members
+    rooms[room]["messages"].append(content)
+
+    # Emit "update" event to clients in the room
+    for session_id in rooms[room].get("sessions", set()):
+        emit("update", to=session_id)
+
+
+@socketio.on("connect")
+def connect():
+    room = session.get("room")
+    name = session.get("name")
+    if not room or not name:
+        return
+    if room not in rooms:
+        leave_room(room)
+        return
+
+    join_room(room)
+    rooms[room]["sessions"].add(request.sid)  # Add session ID to room's sessions
+    send({"name": name, "message": "has entered the room", "time": datetime.now().strftime("%H:%M:%S")}, to=room)
+    rooms[room]["members"] += 1
+    print(f"{name} joined room {room}")
+
+
+@socketio.on("disconnect")
+def disconnect():
+    room = session.get("room")
+    name = session.get("name")
+    leave_room(room)
+
+    if room in rooms:
+        rooms[room]["members"] -= 1
+        rooms[room]["sessions"].discard(request.sid)  # Remove session ID from room's sessions
+        if rooms[room]["members"] <= 0:
+            del rooms[room]
+
+    send({"name": name, "message": "has left the room", "time": datetime.now().strftime("%H:%M:%S")}, to=room)
+    print(datetime.now().strftime("%H:%M:%S"))
+    print(f"{name} has left the room {room}")
+
+
+def format_file_size(size):
+    # Implement formatFileSize filter
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.2f} KB"
+    elif size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.2f} MB"
+    else:
+        return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+
+app.jinja_env.filters['format_file_size'] = format_file_size
+
+if __name__ == "__main__":
+    socketio.run(app)

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.2.0/socket.io.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+<h1>Chat App</h1>
+<div id="userList">
+    <h2>Пользователи:</h2>
+    <ul id="users"></ul>
+</div>
+<div id="startChat">
+    <h2>Начать чат:</h2>
+    <input type="text" id="otherUserIdInput" placeholder="Введите идентификатор пользователя">
+    <button id="startChatButton">Начать</button>
+</div>
+<div id="chatList">
+    <h2>Чаты:</h2>
+    <ul id="chats"></ul>
+</div>
+<div id="chatBox" style="display: none;">
+    <h2 id="chatTitle"></h2>
+    <div id="chatMessages">
+        <ul id="messages"></ul>
+    </div>
+    <input type="text" id="messageInput" placeholder="Введите сообщение">
+    <button id="sendButton">Отправить</button>
+    <button id="leaveButton">Покинуть чат</button>
+</div>
+
+
+<script>
+    var socket = io();
+
+    socket.on('connect', function () {
+        console.log('Connected');
+    });
+
+    socket.on('join_chat', function (chat) {
+        showChat(chat.id);
+    });
+
+    socket.on('disconnect', function () {
+        console.log('Disconnected');
+    });
+
+    socket.on('user_connected', function (user) {
+        addUser(user);
+    });
+
+    socket.on('user_disconnected', function (user_id) {
+        removeUser(user_id);
+    });
+
+    socket.on('chat_joined', function (chat) {
+        addChat(chat);
+    });
+
+    socket.on('chat_left', function (chat_id) {
+        removeChat(chat_id);
+    });
+
+    socket.on('message_sent', function (data) {
+        console.log("sent")
+        addMessage(data);
+    });
+
+    function addUser(user) {
+        $('#users').append($('<li>').attr('id', user.id).text(user.id));
+    }
+
+    function removeUser(user_id) {
+        $('#' + user_id).remove();
+    }
+
+    function addChat(chat) {
+        var chatItem = $('<li>').attr('id', chat.id).text(chat.id).click(function () {
+            var chatId = $(this).attr('id');
+            showChat(chatId);
+        });
+        $('#chats').append(chatItem);
+        if ($('#chatTitle').text() === '') {
+            var chatId = chatItem.attr('id');
+            showChat(chatId);
+        }
+    }
+
+    function removeChat(chat_id) {
+        $('#' + chat_id).remove();
+        if ($('#chatTitle').attr('data-chat-id') === chat_id) {
+            $('#chatBox').hide();
+            $('#chatTitle').text('');
+            $('#messages').empty();
+        }
+    }
+
+    function joinChat(otherUserId) {
+        var currentUserId = socket.id;
+        if (currentUserId !== otherUserId) {
+            socket.emit('join_chat', {'user_id': otherUserId});
+        } else {
+            console.log('Вы не можете начать чат с самим собой.');
+            // Вывод сообщения об ошибке или выполнение других действий по вашему усмотрению
+        }
+    }
+
+    function leaveChat() {
+        var chatId = $('#chatTitle').attr('data-chat-id');
+        socket.emit('leave_chat', chatId);
+        $('#chatBox').hide();
+        $('#chatTitle').text('');
+        $('#messages').empty();
+    }
+
+    function showChat(chatId) {
+        var chatTitle = $('#' + chatId).text();
+        $('#chatTitle').text(chatTitle).attr('data-chat-id', chatId);
+        $('#chatBox').show();
+        $('#messages').empty();
+    }
+
+    function addMessage(data) {
+        console.log(data.message);
+        var chatId = $('#chatTitle').attr('data-chat-id');
+        if (data.chat_id === chatId) {
+            var message = data.message;
+            var messageText = '[' + message.timestamp + '] ' + message.user_id + ': ' + message.message;
+            $('#messages').append($('<li>').text(messageText));
+            // Прокрутка вниз, чтобы видеть новые сообщения
+            var messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+    }
+
+
+    $(document).ready(function () {
+        $('#sendButton').click(function () {
+            var chatId = $('#chatTitle').attr('data-chat-id');
+            var message = $('#messageInput').val();
+            var timestamp = new Date().toLocaleTimeString();
+            var data = {'chat_id': chatId, 'message': message, 'timestamp': timestamp};
+            socket.emit('send_message', data);
+            console.log(data);
+            $('#messageInput').val('');
+        });
+
+        $('#leaveButton').click(function () {
+            leaveChat();
+        });
+
+        $('#startChatButton').click(function () {
+            var otherUserId = $('#otherUserIdInput').val();
+            joinChat(otherUserId);
+            $('#otherUserIdInput').val('');
+        });
+    });
+</script>
+</body>
+</html>

@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.2.0/socket.io.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+</head>
+<body>
+<h1>Chat App</h1>
+<div id="userList">
+    <h2>Пользователи:</h2>
+    <ul id="users"></ul>
+</div>
+<div id="startChat">
+    <h2>Начать чат:</h2>
+    <input type="text" id="otherUserIdInput" placeholder="Введите идентификатор пользователя">
+    <button id="startChatButton">Начать</button>
+</div>
+<div id="chatList">
+    <h2>Чаты:</h2>
+    <ul id="chats"></ul>
+</div>
+<div id="chatBox" style="display: block;">
+    <h2 id="chatTitle"></h2>
+    <div id="chatMessages">
+        <ul id="messages"></ul>
+    </div>
+    <input type="text" id="messageInput" placeholder="Введите сообщение">
+    <button id="sendButton">Отправить</button>
+    <button id="leaveButton">Покинуть чат</button>
+</div>
+
+
+<script>
+    var socket = io();
+    var sharedKey = null; // Shared AES key
+    var dhPrivateKey = null; // DH private key
+    var dhPublicKey = null; // DH public key
+
+    socket.on('connect', function () {
+        console.log('Connected');
+        generateDHKeyPair(); // Generate DH key pair on connect
+    });
+
+    socket.on('dh_shared_key', function (data) {
+        var user_id = data.user_id;
+        var shared_key = data.shared_key;
+        localStorage.setItem(user_id, shared_key);
+        console.log('Received shared key from server:', shared_key);
+        sharedKey = shared_key; // Store the shared key
+    });
+
+    function generateDHKeyPair() {
+        crypto.subtle.generateKey(
+            {
+                name: "ECDH",
+                namedCurve: "P-256",
+            },
+            true,
+            ["deriveKey", "deriveBits"]
+        )
+            .then(function (keyPair) {
+                dhPrivateKey = keyPair.privateKey;
+                return crypto.subtle.exportKey("jwk", keyPair.publicKey);
+            })
+            .then(function (jwk) {
+                dhPublicKey = jwk;
+                console.log("Generated DH key pair:", jwk);
+
+                // Send public key to the server
+                socket.emit('dh_public_key', {
+                    'user_id': socket.id,
+                    'public_key': jwk
+                });
+            })
+            .catch(function (error) {
+                console.error("Error generating DH key pair:", error);
+            });
+    }
+
+    // Function to generate AES key
+    function generateAESKey() {
+        return crypto.subtle.generateKey(
+            {
+                name: "AES-GCM",
+                length: 256,
+            },
+            true,
+            ["encrypt", "decrypt"]
+        );
+    }
+
+    // Function to export AES key as a JWK
+    function exportAESKey(key) {
+        return crypto.subtle.exportKey("jwk", key);
+    }
+
+    // Function to import AES key from a JWK
+    function importAESKey(jwk) {
+        return crypto.subtle.importKey(
+            "jwk",
+            jwk,
+            {
+                name: "AES-GCM",
+            },
+            true,
+            ["encrypt", "decrypt"]
+        );
+    }
+
+    // Function to encrypt a message with AES
+    function encryptMessage(message, key) {
+        var iv = crypto.getRandomValues(new Uint8Array(12)); // Generate random IV
+        return crypto.subtle.encrypt(
+            {
+                name: "AES-GCM",
+                iv: iv,
+            },
+            key,
+            new TextEncoder().encode(message)
+        )
+            .then(function (encrypted) {
+                var cipherText = new Uint8Array(encrypted);
+                var combined = new Uint8Array(iv.length + cipherText.length);
+                combined.set(iv);
+                combined.set(cipherText, iv.length);
+                return combined;
+            });
+    }
+
+    // Function to decrypt a message with AES
+    function decryptMessage(encryptedMessage, key) {
+        var iv = encryptedMessage.slice(0, 12);
+        var cipherText = encryptedMessage.slice(12);
+        return crypto.subtle.decrypt(
+            {
+                name: "AES-GCM",
+                iv: iv,
+            },
+            key,
+            cipherText
+        )
+            .then(function (decrypted) {
+                return new TextDecoder().decode(decrypted);
+            });
+    }
+
+    socket.on('user_connected', function (user) {
+        addUser(user);
+        // Добавить код для обновления списка чатов, если текущий пользователь присоединился к новому пользователю
+        var currentChatId = $('#chatTitle').attr('data-chat-id');
+        if (currentChatId === user.id) {
+            joinChat(user.id);
+        }
+    });
+
+    socket.on('user_disconnected', function (user_id) {
+        removeUser(user_id);
+    });
+
+    socket.on('chat_joined', function (chat) {
+        addChat(chat);
+    });
+
+    socket.on('chat_left', function (chat_id) {
+        removeChat(chat_id);
+    });
+
+    socket.on('message_sent', function (data) {
+        console.log("sent")
+        addMessage(data);
+    });
+
+    function addUser(user) {
+        $('#users').append($('<li>').attr('id', user.id).text(user.id));
+    }
+
+    function removeUser(user_id) {
+        $('#' + user_id).remove();
+    }
+
+    function addUser(user) {
+        var userItem = $('<li>').attr('id', user.id).text(user.id).click(function () {
+            var otherUserId = $(this).attr('id');
+            joinChat(otherUserId);
+        });
+        $('#users').append(userItem);
+    }
+
+    function addChat(chat) {
+        var chatItem = $('<li>').attr('id', chat.id).text(chat.id).click(function () {
+            var chatId = $(this).attr('id');
+            showChat(chatId);
+        });
+        $('#chats').append(chatItem);
+        if ($('#chatTitle').text() === '') {
+            var chatId = chatItem.attr('id');
+            showChat(chatId);
+        }
+    }
+
+    function removeChat(chat_id) {
+        $('#' + chat_id).remove();
+        if ($('#chatTitle').attr('data-chat-id') === chat_id) {
+            $('#chatBox').hide();
+            $('#chatTitle').text('');
+            $('#messages').empty();
+        }
+    }
+
+function joinChat(otherUserId) {
+    var currentUserId = socket.id;
+    if (currentUserId !== otherUserId) {
+        // Отправить запрос на сервер для проверки существования пользователя
+        $.get('/check_user', {user_id: otherUserId}, function(response) {
+            if (response.exists) {
+                socket.emit('join_chat', {'user_id': otherUserId});
+
+                // Показать поле ввода сообщения
+                $('#chatBox').show();
+            } else {
+                console.log('Пользователь с идентификатором ' + otherUserId + ' не найден.');
+                // Вывести сообщение об ошибке или выполнить другие действия по вашему усмотрению
+            }
+        });
+    } else {
+        console.log('Вы не можете начать чат с самим собой.');
+        // Вывести сообщение об ошибке или выполнить другие действия по вашему усмотрению
+    }
+}
+
+
+    function leaveChat(chatId) {
+        socket.emit('leave_chat', chatId);
+    }
+
+    function sendMessage() {
+        var chatId = $('#chatTitle').attr('data-chat-id');
+        var message = $('#messageInput').val();
+        var timestamp = new Date().toLocaleString();
+
+        if (sharedKey) {
+            var encryptedMessage;
+            var aesKey;
+
+            if (localStorage.getItem(chatId)) {
+                // Shared key already stored
+                var sharedKeyJwk = JSON.parse(localStorage.getItem(chatId));
+                aesKey = importAESKey(sharedKeyJwk);
+            } else {
+                // Generate new AES key
+                aesKey = generateAESKey().then(function (key) {
+                    return exportAESKey(key).then(function (jwk) {
+                        localStorage.setItem(chatId, JSON.stringify(jwk)); // Store shared key
+                        return key;
+                    });
+                });
+            }
+
+            aesKey.then(function (key) {
+                encryptedMessage = encryptMessage(message, key);
+                return encryptedMessage;
+            }).then(function (encryptedMessage) {
+                var encryptedBase64 = arrayBufferToBase64(encryptedMessage);
+                socket.emit('send_message', {
+                    'chat_id': chatId,
+                    'message': encryptedBase64,
+                    'timestamp': timestamp
+                });
+                $('#messageInput').val('');
+            }).catch(function (error) {
+                console.error("Error encrypting message:", error);
+            });
+        } else {
+            console.log("Shared key not available yet. Cannot send message.");
+        }
+    }
+
+    function arrayBufferToBase64(buffer) {
+        var binary = '';
+        var bytes = new Uint8Array(buffer);
+        var len = bytes.byteLength;
+        for (var i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return window.btoa(binary);
+    }
+
+    function base64ToArrayBuffer(base64) {
+        var binary_string = window.atob(base64);
+        var len = binary_string.length;
+        var bytes = new Uint8Array(len);
+        for (var i = 0; i < len; i++) {
+            bytes[i] = binary_string.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    function addMessage(data) {
+        var message = data.message;
+        var user_id = message.user_id;
+        var timestamp = message.timestamp;
+
+        if (sharedKey) {
+            var encryptedMessage = base64ToArrayBuffer(message.message);
+            var aesKey = importAESKey(JSON.parse(localStorage.getItem(data.chat_id)));
+            decryptMessage(encryptedMessage, aesKey)
+                .then(function (decryptedMessage) {
+                    var messageItem = $('<li>').text('[' + timestamp + '] ' + user_id + ': ' + decryptedMessage);
+                    $('#messages').append(messageItem);
+                })
+                .catch(function (error) {
+                    console.error("Error decrypting message:", error);
+                });
+        } else {
+            console.log("Shared key not available yet. Cannot decrypt message.");
+        }
+    }
+
+    function showChat(chatId) {
+        var chat = $('#' + chatId);
+        $('#chatTitle').text(chat.text());
+        $('#chatTitle').attr('data-chat-id', chatId);
+        $('#messages').empty();
+        $('#messageInput').val('');
+
+        if (localStorage.getItem(chatId)) {
+            $('#chatBox').show();
+        } else {
+            $('#chatBox').hide();
+        }
+    }
+
+    $(function () {
+        $('#startChatButton').click(function () {
+            var otherUserId = $('#otherUserIdInput').val();
+            joinChat(otherUserId);
+        });
+
+        $('#sendButton').click(function () {
+            sendMessage();
+        });
+
+        $('#leaveButton').click(function () {
+            var chatId = $('#chatTitle').attr('data-chat-id');
+            leaveChat(chatId);
+        });
+    });
+</script>
+</body>
+</html>

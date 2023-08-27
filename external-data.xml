@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<data>
+  <object-set>
+    <root path="">
+      <view name="messages" query="CREATE TABLE messages (&#xa;    id INTEGER PRIMARY KEY,&#xa;    chat_id VARCHAR(50),&#xa;    user_id VARCHAR(50),&#xa;    content TEXT,&#xa;    timestamp VARCHAR(50)&#xa;);&#xa;"/>
+    </root>
+  </object-set>
+</data>

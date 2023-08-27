@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chat App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.2.0/socket.io.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.0.0/crypto-js.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/elliptic/6.5.4/elliptic.js"></script>
+</head>
+<body>
+<h1>Chat App</h1>
+<div id="userList">
+    <h2>Пользователи:</h2>
+    <ul id="users"></ul>
+</div>
+<div id="startChat">
+    <h2>Начать чат:</h2>
+    <input type="text" id="otherUserIdInput" placeholder="Введите идентификатор пользователя">
+    <button id="startChatButton">Начать</button>
+</div>
+<div id="chatList">
+    <h2>Чаты:</h2>
+    <ul id="chats"></ul>
+</div>
+<div id="chatBox" style="display: none;">
+    <h2 id="chatTitle"></h2>
+    <div id="chatMessages">
+        <ul id="messages"></ul>
+    </div>
+    <input type="text" id="messageInput" placeholder="Введите сообщение">
+    <button id="sendButton">Отправить</button>
+    <button id="leaveButton">Покинуть чат</button>
+</div>
+
+<script>
+var socket = io();
+
+// Генерация ключей ECDH
+var ec = new elliptic.ec('secp256k1');
+var key = ec.genKeyPair();
+var publicKey = key.getPublic('hex');
+console.log(publicKey + "user_key")
+var privateKey = key.getPrivate('hex');
+var otherUserPublicKey;
+var joinedChat = false;
+
+// Функция для шифрования сообщения с использованием публичного ключа другого пользователя
+function encryptMessageWithPublicKey(message, publicKey) {
+    var ec = new elliptic.ec('secp256k1');
+    var key = ec.keyFromPublic(publicKey, 'hex');
+    var sharedSecret = key.derive(ec.keyFromPrivate(privateKey, 'hex').getPrivate());
+    var encryptedMessage = CryptoJS.AES.encrypt(message, sharedSecret.toString('hex')).toString();
+    return encryptedMessage;
+}
+
+// Функция для отправки зашифрованного сообщения
+function sendEncryptedMessage(chatId, encryptedMessage) {
+    var timestamp = new Date().toLocaleTimeString();
+    var data = {
+        'chat_id': chatId,
+        'message': encryptedMessage,
+        'timestamp': timestamp
+    };
+    socket.emit('send_message', data);
+}
+
+socket.on('connect', function () {
+    console.log('Connected');
+});
+
+socket.on('join_chat', function (chat) {
+    showChat(chat.id);
+});
+
+socket.on('disconnect', function () {
+    console.log('Disconnected');
+});
+
+socket.on('user_connected', function (user) {
+    addUser(user);
+});
+
+socket.on('user_disconnected', function (user_id) {
+    removeUser(user_id);
+});
+
+socket.on('chat_joined', function (chat) {
+    addChat(chat);
+    sendPublicKey(chat.users, chat.id);
+});
+
+socket.on('chat_left', function (chat_id) {
+    removeChat(chat_id);
+});
+
+socket.on('msg_sent', function (data) {
+    addMessage(data);
+});
+
+socket.on('receive_public_key', function (data) {
+    console.log('Received public key from user:', data.user_id);
+    otherUserPublicKey = data.public_key;
+    console.log(otherUserPublicKey + " other_user_key")
+
+    var chatId = $('#chatTitle').attr('data-chat-id');
+    if (chatId === data.chat_id && !joinedChat) {
+        joinChat(data.user_id, chatId); // Присоединяемся к чату после получения публичного ключа
+        joinedChat = true; // Устанавливаем флаг, чтобы избежать повторного выполнения
+    }
+});
+
+function addUser(user) {
+    $('#users').append($('<li>').attr('id', user.id).text(user.id));
+}
+
+function removeUser(user_id) {
+    $('#' + user_id).remove();
+}
+
+function addChat(chat) {
+    var chatItem = $('<li>').attr('id', chat.id).text(chat.id).click(function () {
+        var chatId = $(this).attr('id');
+        showChat(chatId);
+    });
+    $('#chats').append(chatItem);
+    if ($('#chatTitle').text() === '') {
+        var chatId = chatItem.attr('id');
+        showChat(chatId);
+    }
+}
+
+function removeChat(chat_id) {
+    $('#' + chat_id).remove();
+    if ($('#chatTitle').attr('data-chat-id') === chat_id) {
+        $('#chatBox').hide();
+        $('#chatTitle').text('');
+        $('#messages').empty();
+    }
+}
+
+function joinChat(otherUserId, chatId) {
+    var currentUserId = socket.id;
+    if (currentUserId !== otherUserId) {
+        socket.emit('join_chat', {'user_id': otherUserId});
+        sendPublicKey(otherUserId, chatId); // Отправляем открытый ключ другому пользователю
+    } else {
+        console.log('Вы не можете начать чат с самим собой.');
+    }
+}
+
+function leaveChat() {
+    var chatId = $('#chatTitle').attr('data-chat-id');
+    socket.emit('leave_chat', chatId);
+    $('#chatBox').hide();
+    $('#chatTitle').text('');
+    $('#messages').empty();
+}
+
+function showChat(chatId) {
+    var chatTitle = $('#' + chatId).text();
+    $('#chatTitle').text(chatTitle).attr('data-chat-id', chatId);
+    $('#chatBox').show();
+    $('#messages').empty();
+}
+
+function addMessage(data) {
+    var chatId = $('#chatTitle').attr('data-chat-id');
+    if (data.chat_id === chatId) {
+        var decryptedMessage = decryptMessage(data.message, publicKey);
+        var messageText = '[' + data.timestamp + '] ' + data.user_id + ': ' + decryptedMessage;
+        $('#messages').append($('<li>').text(messageText));
+        var messagesDiv = document.getElementById('messages');
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+}
+
+// Отправка открытого ключа другому клиенту
+function sendPublicKey(user_id, chat_id) {
+    var data = {
+        'user_id': user_id,
+        'public_key': publicKey,
+        'chat_id': chat_id // Передаем идентификатор чата
+    };
+    socket.emit('send_public_key', data);
+}
+
+// Расшифровка сообщения с использованием собственного приватного ключа
+function decryptMessage(encryptedMessage, publicKey) {
+    var ec = new elliptic.ec('secp256k1');
+    var key = ec.keyFromPrivate(privateKey, 'hex');
+    var sharedSecret = key.derive(ec.keyFromPublic(publicKey, 'hex').getPublic());
+    var decryptedMessage = CryptoJS.AES.decrypt(encryptedMessage, sharedSecret.toString('hex')).toString(CryptoJS.enc.Utf8);
+    return decryptedMessage;
+}
+
+$(document).ready(function () {
+    $('#startChatButton').click(function () {
+        var otherUserId = $('#otherUserIdInput').val().trim();
+        var chatId = Math.random().toString(36).substring(7); // Генерируем случайный идентификатор чата
+        joinChat(otherUserId, chatId);
+        $('#otherUserIdInput').val('');
+    });
+
+    $('#sendButton').click(function () {
+        var message = $('#messageInput').val().trim();
+        var encryptedMessage = encryptMessageWithPublicKey(message, otherUserPublicKey)
+
+        sendEncryptedMessage($('#chatTitle').attr('data-chat-id'), encryptedMessage);
+        $('#messageInput').val('');
+    });
+
+    $('#leaveButton').click(function () {
+        leaveChat();
+    });
+});
+
+</script>
+</body>
+</html>

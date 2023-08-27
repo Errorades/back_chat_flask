@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chat Application</title>
+  <style>
+    /* Ваши стили здесь */
+  </style>
+</head>
+<body>
+  <div class="chat">
+    <div class="contacts">
+      <input type="text" id="room-input" placeholder="Other User's ID">
+      <button id="add-button">Add</button>
+      <div id="contacts-list"></div>
+    </div>
+    <div class="messages">
+      <div id="messages-container"></div>
+      <form id="message-form">
+        <input type="text" id="message-input" placeholder="Message">
+        <button id="send-button" disabled>Send</button>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.3.1/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/node-forge/0.10.0/forge.min.js"></script>
+  <script>
+    const URL = "YOUR_SERVER_URL";
+    const socket = io.connect(URL);
+    let publicKey = null;
+    let privateKey = null;
+    let user = null;
+    let to = null;
+    let messages = [];
+    let users = [];
+
+    const copyToClipboard = async (text) => {
+      await navigator.clipboard.writeText(text);
+      alert("Text Copied");
+    };
+
+    const login = async () => {
+      const publicKeyPem = forge.pki.publicKeyToPem(publicKey);
+      const response = await fetch(`${URL}/login/${encodeURIComponent(publicKeyPem)}`);
+      const json = await response.json();
+      user = json.user;
+    };
+
+    const connect = async (otherUser) => {
+      const response = await fetch(`${URL}/connect/${encodeURIComponent(otherUser)}`);
+      const json = await response.json();
+      const otherUserPublicKeyPem = Buffer.from(json.publicKey, "base64").toString("ascii");
+      const otherUserPublicKey = forge.pki.publicKeyFromPem(otherUserPublicKeyPem);
+      return otherUserPublicKey;
+    };
+
+    const retrieveMessages = (user) => {
+      if (localStorage.getItem(user)) {
+        try {
+          messages = JSON.parse(localStorage.getItem(user));
+        } catch (error) {
+          localStorage.removeItem(user);
+          messages = [];
+        }
+      } else {
+        messages = [];
+      }
+    };
+
+    const sendMessage = async () => {
+      const messageInput = document.getElementById("message-input");
+      const message = messageInput.value.trim();
+      if (message !== "") {
+        const encryptedMessage = publicKey.encrypt(message);
+        socket.emit("send_message", {
+          user,
+          message: encryptedMessage,
+          to,
+        });
+
+        const messageObj = {
+          user: "self",
+          message,
+        };
+        messages.push(messageObj);
+        localStorage.setItem(to, JSON.stringify(messages));
+        renderMessages();
+
+        messageInput.value = "";
+        document.getElementById("send-button").disabled = true;
+      }
+    };
+
+    const renderContacts = () => {
+      const contactsList = document.getElementById("contacts-list");
+      contactsList.innerHTML = "";
+      users.forEach((contact) => {
+        const contactButton = document.createElement("button");
+        contactButton.innerText = contact;
+        contactButton.classList.add("contact");
+        contactButton.style.backgroundColor = contact === to ? "#f0f0f0" : "white";
+        contactButton.addEventListener("click", async () => {
+          to = contact;
+          retrieveMessages(to);
+          renderMessages();
+          const otherUserPublicKey = await connect(to);
+          const messageForm = document.getElementById("message-form");
+          messageForm.style.display = "block";
+          document.getElementById("send-button").disabled = true;
+          const roomInput = document.getElementById("room-input");
+          roomInput.value = "";
+          roomInput.placeholder = `Connected to ${to}`;
+          contactButton.style.backgroundColor = "#f0f0f0";
+          publicKey = forge.pki.publicKeyToPem(publicKey);
+          privateKey = forge.pki.privateKeyToPem(privateKey);
+          await login();
+          socket.emit("join_room", { user });
+          socket.emit("leave_room", { user: to });
+          publicKey = forge.pki.publicKeyFromPem(publicKey);
+          privateKey = forge.pki.privateKeyFromPem(privateKey);
+          socket.emit("join_room", { user: to });
+        });
+        contactsList.appendChild(contactButton);
+      });
+    };
+
+    const renderMessages = () => {
+      const messagesContainer = document.getElementById("messages-container");
+      messagesContainer.innerHTML = "";
+      messages.forEach((messageObj) => {
+        const messageDiv = document.createElement("div");
+        messageDiv.classList.add("message");
+        messageDiv.classList.add(messageObj.user);
+        const messageText = document.createElement("p");
+        messageText.innerText = messageObj.message;
+        const messageUser = document.createElement("span");
+        messageUser.innerText = messageObj.user;
+        const timestamp = document.createElement("span");
+        timestamp.innerText = new Date(messageObj.timestamp).toLocaleTimeString();
+        messageDiv.appendChild(messageUser);
+        messageDiv.appendChild(messageText);
+        messageDiv.appendChild(timestamp);
+        messagesContainer.appendChild(messageDiv);
+      });
+      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    };
+
+    const addContact = () => {
+      const roomInput = document.getElementById("room-input");
+      const roomID = roomInput.value.trim();
+      if (roomID !== "" && roomID !== user && !users.includes(roomID)) {
+        users.push(roomID);
+        localStorage.setItem("users", JSON.stringify(users));
+        roomInput.value = "";
+        renderContacts();
+      }
+    };
+
+    const initialize = () => {
+      const addBtn = document.getElementById("add-button");
+      addBtn.addEventListener("click", addContact);
+      const messageInput = document.getElementById("message-input");
+      const sendBtn = document.getElementById("send-button");
+      messageInput.addEventListener("input", () => {
+        sendBtn.disabled = messageInput.value.trim() === "";
+      });
+      const messageForm = document.getElementById("message-form");
+      messageForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        sendMessage();
+      });
+
+      if (localStorage.getItem("users")) {
+        try {
+          users = JSON.parse(localStorage.getItem("users"));
+        } catch (error) {
+          localStorage.removeItem("users");
+          users = [];
+        }
+      } else {
+        users = [];
+      }
+
+      const roomInput = document.getElementById("room-input");
+      roomInput.addEventListener("input", () => {
+        const roomID = roomInput.value.trim();
+        addBtn.disabled = roomID === "" || roomID === user || users.includes(roomID);
+      });
+
+      retrieveMessages(to);
+      renderContacts();
+      renderMessages();
+    };
+
+    const generateKeys = () => {
+      const rsa = forge.pki.rsa;
+      const keypair = rsa.generateKeyPair({ bits: 2048, e: 0x10001 });
+      publicKey = keypair.publicKey;
+      privateKey = keypair.privateKey;
+    };
+
+    const load = async () => {
+      generateKeys();
+      await login();
+      socket.emit("join_room", { user });
+
+      socket.on("connect", () => {
+        console.log("Connected to server");
+      });
+
+      socket.on("user_joined", (data) => {
+        console.log(`${data.user} joined the chat`);
+        users.push(data.user);
+        localStorage.setItem("users", JSON.stringify(users));
+        renderContacts();
+      });
+
+      socket.on("user_left", (data) => {
+        console.log(`${data.user} left the chat`);
+        const index = users.indexOf(data.user);
+        if (index > -1) {
+          users.splice(index, 1);
+          localStorage.setItem("users", JSON.stringify(users));
+          if (to === data.user) {
+            to = null;
+            const messagesContainer = document.getElementById("messages-container");
+            messagesContainer.innerHTML = "";
+            const messageForm = document.getElementById("message-form");
+            messageForm.style.display = "none";
+            const roomInput = document.getElementById("room-input");
+            roomInput.placeholder = "Other User's ID";
+          }
+          renderContacts();
+        }
+      });
+
+      socket.on("receive_message", (data) => {
+        console.log(`Received message from ${data.user}`);
+        const messageObj = {
+          user: data.user,
+          message: privateKey.decrypt(data.message),
+          timestamp: data.timestamp,
+        };
+        messages.push(messageObj);
+        localStorage.setItem(to, JSON.stringify(messages));
+        renderMessages();
+      });
+
+      initialize();
+    };
+
+    load();
+  </script>
+</body>
+</html>

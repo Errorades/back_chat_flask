@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Room</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+{% block content %}
+    <div class="message-box">
+        <h2>Chat Room: {{ code }}</h2>
+        <div class="messages" id="messages">
+            {% for msg in messages %}
+                <div class="text">
+                    {% if msg.file %}
+                        {% if msg.file.type.startswith("image/") %}
+                            <span>
+                                <strong>{{ msg.name }}</strong> sent an image:
+                            </span>
+                            <span>
+                                <img src="{{ url_for('static', filename='images/' + msg.file.name) }}" alt="{{ msg.file.name }}" width="300" height="300"/>
+                            </span>
+                        {% else %}
+                            <span>
+                                <strong>{{ msg.name }}</strong> sent a file:
+                            </span>
+                            <span>
+                                <a href="{{ url_for('static', filename='files/' + msg.file.name) }}" download="{{ msg.file.name }}" target="_blank">{{ msg.file.name }} ({{ msg.file.size | formatFileSize  }})</a>
+                            </span>
+                        {% endif %}
+                    {% else %}
+                        <span>
+                            <strong>{{ msg.name }}</strong>: {{ msg.message }}
+                        </span>
+                    {% endif %}
+                    <span class="muted">
+                        {{ msg.time }}
+                    </span>
+                </div>
+            {% endfor %}
+        </div>
+        <div class="inputs">
+            <input type="text" placeholder="Message" name="message" id="message"/>
+            <input type="file" name="file" id="file"/>
+            <button type="button" name="send" id="send-btn">Send</button>
+        </div>
+    </div>
+{% endblock %}
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.3.1/socket.io.js"></script>
+<script type="text/javascript">
+    const socket = io();
+
+    const roomCodeElement = document.getElementById("room-code");
+    const messagesElement = document.getElementById("messages");
+    const messageInputElement = document.getElementById("message");
+    const fileInputElement = document.getElementById("file");
+    const sendButtonElement = document.getElementById("send-btn");
+
+    sendButtonElement.addEventListener("click", sendMessage);
+
+    socket.on("connect", () => {
+        const roomCode = getRoomCodeFromURL();
+        if (roomCode) {
+            joinRoom(roomCode);
+        }
+    });
+
+    socket.on("connect_error", function () {
+        socket.connect(); // Переподключение при ошибке соединения
+    });
+
+    socket.on("message", (data) => {
+        if (data.file) {
+            createFileMessage(data.name, data.file, data);
+        } else {
+            createMessage(data.name, data.message, data);
+        }
+    });
+
+    function getRoomCodeFromURL() {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get("room");
+    }
+
+    function joinRoom(code) {
+        socket.emit("join", code, (response) => {
+            if (response.success) {
+                roomCodeElement.textContent = code;
+            } else {
+                alert(response.message);
+            }
+        });
+    }
+
+    function createMessage(name, message, data) {
+        const content = `
+            <div class="text">
+                <span>
+                    <strong>${name}</strong>: ${message}
+                </span>
+                <span class="muted">
+                    ${data.time}
+                </span>
+            </div>
+        `;
+        messagesElement.innerHTML += content;
+        scrollToBottom();
+    }
+
+    function createFileMessage(name, file, data) {
+        let fileContent = "";
+        if (file.type.startsWith("image/")) {
+            const MAX_IMAGE_WIDTH = 300;
+            const MAX_IMAGE_HEIGHT = 300;
+
+            const img = new Image();
+            img.src = file.data;
+            img.onload = function () {
+                const width = img.width;
+                const height = img.height;
+                let displayWidth = width;
+                let displayHeight = height;
+
+                if (width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT) {
+                    if (width > height) {
+                        displayWidth = MAX_IMAGE_WIDTH;
+                        displayHeight = Math.round((height / width) * MAX_IMAGE_WIDTH);
+                    } else {
+                        displayHeight = MAX_IMAGE_HEIGHT;
+                        displayWidth = Math.round((width / height) * MAX_IMAGE_HEIGHT);
+                    }
+                }
+
+                fileContent = `<img src="${file.data}" alt="${file.name}" width="${displayWidth}" height="${displayHeight}" />`;
+                appendFileMessage(name, fileContent, data);
+            };
+        } else {
+            fileContent = `<a href="${file.data}" download="${file.name}" target="_blank">${file.name} (${formatFileSize(file.size)})</a>`;
+            appendFileMessage(name, fileContent, data);
+        }
+    }
+
+    function appendFileMessage(name, fileContent, data) {
+        const content = `
+            <div class="text">
+                <span>
+                    <strong>${name}</strong> sent a file:
+                </span>
+                <span>${fileContent}</span>
+                <span class="muted">
+                    ${data.time}
+                </span>
+            </div>
+        `;
+        messagesElement.innerHTML += content;
+        scrollToBottom();
+    }
+
+    function sendMessage() {
+        const message = messageInputElement.value;
+        const fileInput = fileInputElement.files[0];
+
+        if (message === "" && !fileInput) {
+            return;
+        }
+
+        if (fileInput) {
+            const reader = new FileReader();
+            reader.onload = function (event) {
+                const fileContent = {
+                    name: fileInput.name,
+                    type: fileInput.type,
+                    size: fileInput.size,
+                    data: event.target.result,
+                };
+                socket.emit("file", {file: fileContent, message});
+            };
+            reader.readAsDataURL(fileInput);
+        } else {
+            socket.emit("message", {data: message});
+        }
+
+        messageInputElement.value = "";
+        fileInputElement.value = "";
+    }
+
+    function formatFileSize(size) {
+        if (size < 1024) {
+            return size + " B";
+        } else if (size < 1048576) {
+            return (size / 1024).toFixed(2) + " KB";
+        } else {
+            return (size / 1048576).toFixed(2) + " MB";
+        }
+    }
+
+    function scrollToBottom() {
+        messagesElement.scrollTop = messagesElement.scrollHeight;
+    }
+</script>
+</body>
+</html>
